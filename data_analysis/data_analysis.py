@@ -1,195 +1,259 @@
 import os
-import cv2
 import json
-import numpy as np
-import matplotlib.pyplot as plt
+import pandas as pd
+from collections import defaultdict
+
+# Your existing DataVisualizer class
+class DataVisualizer:
+    """Utility for analyzing and plotting dataset distributions."""
+    def __init__(self, config, train=None, val=None, filtered=False):
+        self.config = config
+        self.train = pd.DataFrame(train or [])
+        self.val = pd.DataFrame(val or [])
+        # Create visualization directory
+        base_dir = config.get("paths", {}).get("vis_dir", "./cfg/data/insights")
+        self.output_dir = os.path.join(base_dir, "filtered") if filtered else base_dir
+        os.makedirs(self.output_dir, exist_ok=True)
+        
+    def _distribution(self, df, column):
+        """Count occurrences in a column, return as dict."""
+        return df[column].value_counts().to_dict() if column in df else {}
+        
+    def by_class(self, training=True):
+        return self._distribution(self.train if training else self.val, "category")
+        
+    def by_weather(self, training=True):
+        return self._distribution(self.train if training else self.val, "weather")
+        
+    def by_scene(self, training=True):
+        return self._distribution(self.train if training else self.val, "scene")
+        
+    def plot_single(self, data, title="", filename="bar_chart.png"):
+        """Plot a single bar chart."""
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        plt.figure(figsize=(8, 6))
+        palette = plt.cm.viridis(np.linspace(0, 1, len(data)))
+        plt.bar(data.keys(), data.values(), color=palette, edgecolor="black")
+        plt.title(title, fontsize=14, fontweight="bold")
+        plt.xlabel("Categories")
+        plt.ylabel("Frequency")
+        plt.xticks(rotation=30, ha="right")
+        plt.grid(axis="y", linestyle="--", alpha=0.6)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, filename))
+        plt.close()
+        
+    def plot_overview(self, training=False):
+        """Plot class, weather, and scene distributions side-by-side."""
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        dataset = "train" if training else "val"
+        fig, axes = plt.subplots(3, 1, figsize=(8, 12))
+        plots = [
+            (self.by_class(training), "Class Distribution"),
+            (self.by_weather(training), "Weather Distribution"),
+            (self.by_scene(training), "Scene Distribution"),
+        ]
+        for ax, (data, title) in zip(axes, plots):
+            palette = plt.cm.plasma(np.linspace(0, 1, len(data)))
+            ax.bar(data.keys(), data.values(), color=palette, edgecolor="black")
+            ax.set_title(title, fontsize=12, fontweight="semibold")
+            ax.set_xticks(range(len(data)))
+            ax.set_xticklabels(data.keys(), rotation=30, ha="right")
+            ax.grid(axis="y", linestyle=":", alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, f"{dataset}_distributions.png"))
+        plt.close()
+        
+    def compare_distributions(self, train_data, val_data, title, filename):
+        """Compare train vs val side by side."""
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        categories = sorted(set(train_data) | set(val_data))
+        train_vals = [train_data.get(cat, 0) for cat in categories]
+        val_vals = [val_data.get(cat, 0) for cat in categories]
+        x = np.arange(len(categories))
+        width = 0.4
+        plt.figure(figsize=(10, 6))
+        plt.bar(x - width/2, train_vals, width, label="Train", color="steelblue")
+        plt.bar(x + width/2, val_vals, width, label="Val", color="salmon")
+        plt.title(title, fontsize=14, fontweight="bold")
+        plt.xlabel("Categories")
+        plt.ylabel("Counts")
+        plt.xticks(x, categories, rotation=30, ha="right")
+        plt.legend()
+        plt.grid(axis="y", linestyle="--", alpha=0.6)
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.output_dir, filename))
+        plt.close()
+        
+    def compare_all(self):
+        """Generate comparison plots for class, weather, and scene."""
+        self.compare_distributions(
+            self.by_class(True),
+            self.by_class(False),
+            "Class: Train vs Val",
+            "class_comparison.png",
+        )
+        self.compare_distributions(
+            self.by_weather(True),
+            self.by_weather(False),
+            "Weather: Train vs Val",
+            "weather_comparison.png",
+        )
+        self.compare_distributions(
+            self.by_scene(True),
+            self.by_scene(False),
+            "Scene: Train vs Val",
+            "scene_comparison.png",
+        )
 
 
-# ==================== CONFIGURATION ====================
-DATASET_PATH = 'vehicle_data'
-TRAIN_LABELS_JSON = os.path.join(DATASET_PATH, 'labels/bdd100k_labels_images_train.json')
-VAL_LABELS_JSON = os.path.join(DATASET_PATH, 'labels/bdd100k_labels_images_val.json')
-IMAGES_PATH_TRAIN = os.path.join(DATASET_PATH, 'images/train')
-IMAGES_PATH_VAL = os.path.join(DATASET_PATH, 'images/val')
-
-CLASSES = [
-    "person", "rider", "car", "bus", "truck",
-    "bike", "motor", "traffic light", "traffic sign", "train"
-]
-
-
-# ==================== DATA LOADING AND PARSING for JSON annotations ====================
-def load_json_annotations(json_path):
+def load_bdd_data(json_path):
+    """Load BDD100K JSON and extract relevant data."""
     with open(json_path, 'r') as f:
         data = json.load(f)
-    parsed = {'annotations': [], 'images': []}
+    
+    records = []
     for item in data:
-        image_id = item.get('name') or item.get('image_id')
-        if not image_id:
-            continue
-        parsed['images'].append(image_id)
-        objects = []
-        for label in item.get('labels', []):
-            cls = label.get('category')
-            box2d = label.get('box2d')
-            if cls in CLASSES and box2d:
-                xmin = int(box2d['x1'])
-                ymin = int(box2d['y1'])
-                xmax = int(box2d['x2'])
-                ymax = int(box2d['y2'])
-                objects.append({'class': cls, 'bbox': (xmin, ymin, xmax, ymax)})
-        parsed['annotations'].append({'image': image_id, 'objects': objects})
-    return parsed
+        image_name = item.get('name', '')
+        
+        # Extract image-level attributes
+        attributes = item.get('attributes', {})
+        weather = attributes.get('weather', 'unknown')
+        scene = attributes.get('scene', 'unknown')
+        timeofday = attributes.get('timeofday', 'unknown')
+        
+        # Extract object-level data
+        labels = item.get('labels', [])
+        if labels:
+            for label in labels:
+                category = label.get('category', 'unknown')
+                if category in ['person', 'rider', 'car', 'bus', 'truck', 
+                               'bike', 'motor', 'traffic light', 'traffic sign', 'train']:
+                    records.append({
+                        'image_name': image_name,
+                        'category': category,
+                        'weather': weather,
+                        'scene': scene,
+                        'timeofday': timeofday
+                    })
+        else:
+            # If no objects, still record image attributes
+            records.append({
+                'image_name': image_name,
+                'category': 'none',
+                'weather': weather,
+                'scene': scene,
+                'timeofday': timeofday
+            })
+    
+    return records
 
 
-# ==================== QUALITY CONTROL AND VALIDATION ====================
-def validate_annotations(data, images_path):
-    print("Performing annotation validation...")
-    for annotation in data['annotations']:
-        image_name = annotation['image']
-        img = cv2.imread(os.path.join(images_path, image_name))
-        if img is None:
-            print(f"Warning: Image not found or corrupted {image_name}")
-            continue
-
-        h, w, _ = img.shape
-        for obj in annotation['objects']:
-            xmin, ymin, xmax, ymax = obj['bbox']
-            if not (0 <= xmin < xmax <= w and 0 <= ymin < ymax <= h):
-                print(f"Invalid bbox in {image_name} for class {obj['class']}: "
-                      f"({xmin}, {ymin}, {xmax}, {ymax}) outside bounds ({w}, {h}).")
-            bbox_w = xmax - xmin
-            bbox_h = ymax - ymin
-            if bbox_w < 5 or bbox_h < 5:
-                print(f"Tiny bbox in {image_name} for class {obj['class']}: "
-                      f"({bbox_w}, {bbox_h})")
-
-
-# ==================== DATA DISTRIBUTION ANALYSIS ====================
-def plot_class_distribution(data, split_name):
-    class_counts = {cls: 0 for cls in CLASSES}
-    for annotation in data['annotations']:
-        for obj in annotation['objects']:
-            if obj['class'] in class_counts:
-                class_counts[obj['class']] += 1
-
-    plt.figure(figsize=(10, 6))
-    plt.bar(class_counts.keys(), class_counts.values(), color='skyblue')
-    plt.title(f'Object Class Distribution - {split_name}')
-    plt.xlabel('Class')
-    plt.ylabel('Number of Objects')
-    plt.xticks(rotation=45)
-    plt.tight_layout()
-    plt.savefig(f'class_distribution_{split_name}.png')
-    plt.close()
-
-
-def plot_bbox_size_distribution(data, split_name):
-    all_areas = []
-    for annotation in data['annotations']:
-        for obj in annotation['objects']:
-            xmin, ymin, xmax, ymax = obj['bbox']
-            area = (xmax - xmin) * (ymax - ymin)
-            all_areas.append(area)
-
-    plt.figure(figsize=(10, 6))
-    plt.hist(all_areas, bins=50, color='lightgreen', edgecolor='black')
-    plt.title(f'Bounding Box Area Distribution - {split_name}')
-    plt.xlabel('Area (pixels)')
-    plt.ylabel('Frequency')
-    plt.yscale('log')
-    plt.tight_layout()
-    plt.savefig(f'size_distribution_{split_name}.png')
-    plt.close()
-
-
-def plot_image_properties(data, images_path, split_name):
-    widths, heights = [], []
-    for image_name in data['images']:
-        img = cv2.imread(os.path.join(images_path, image_name))
-        if img is not None:
-            h, w, _ = img.shape
-            heights.append(h)
-            widths.append(w)
-
-    plt.figure(figsize=(12, 6))
-    plt.subplot(1, 2, 1)
-    plt.hist(widths, bins=30, color='coral', edgecolor='black')
-    plt.title(f'Image Width Distribution - {split_name}')
-    plt.xlabel('Width (pixels)')
-    plt.ylabel('Frequency')
-
-    plt.subplot(1, 2, 2)
-    plt.hist(heights, bins=30, color='teal', edgecolor='black')
-    plt.title(f'Image Height Distribution - {split_name}')
-    plt.xlabel('Height (pixels)')
-    plt.ylabel('Frequency')
-
-    plt.tight_layout()
-    plt.savefig(f'properties_{split_name}.png')
-    plt.close()
-
-
-# ==================== EDGE CASE VISUALIZATION ====================
-def visualize_difficult_cases(data, images_path, split_name, num_examples=5, min_bbox_area=50, max_bbox_area=500):
-    print(f"Visualizing {num_examples} difficult cases - {split_name}...")
-    difficult_images = []
-    for annotation in data['annotations']:
-        for obj in annotation['objects']:
-            xmin, ymin, xmax, ymax = obj['bbox']
-            area = (xmax - xmin) * (ymax - ymin)
-            if min_bbox_area <= area <= max_bbox_area:
-                difficult_images.append(annotation['image'])
-                break
-
-    if not difficult_images:
-        print(f"No difficult cases found for {split_name} dataset.")
-        return
-
-    import matplotlib.pyplot as plt
-    plt.figure(figsize=(15, 5 * num_examples))
-    sample_images = np.random.choice(difficult_images, min(num_examples, len(difficult_images)), replace=False)
-
-    for i, image_name in enumerate(sample_images):
-        img_path = os.path.join(images_path, image_name)
-        img = cv2.imread(img_path)
-        if img is None:
-            continue
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        for annotation in data['annotations']:
-            if annotation['image'] == image_name:
-                for obj in annotation['objects']:
-                    xmin, ymin, xmax, ymax = obj['bbox']
-                    color = (0, 255, 0)
-                    cv2.rectangle(img_rgb, (xmin, ymin), (xmax, ymax), color, 2)
-                    cv2.putText(img_rgb, obj['class'], (xmin, ymin - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
-
-        plt.subplot(num_examples, 1, i + 1)
-        plt.imshow(img_rgb)
-        plt.title(f"Difficult Case: {image_name} ({split_name})")
-        plt.axis('off')
-
-    plt.tight_layout()
-    plt.savefig(f'difficult_cases_{split_name}.png')
-    plt.show()
+def main():
+    """Main function to run BDD data visualization."""
+    
+    # Configuration
+    config = {
+        "paths": {
+            "vis_dir": "./bdd_analysis_results"
+        }
+    }
+    
+    # Paths to your BDD data
+    TRAIN_JSON = "./vehicle_data/labels/bdd100k_labels_images_train.json"
+    VAL_JSON = "./vehicle_data/labels/bdd100k_labels_images_val.json"
+    
+    print("Loading BDD training data...")
+    train_records = load_bdd_data(TRAIN_JSON)
+    print(f"Loaded {len(train_records)} training records")
+    
+    print("Loading BDD validation data...")
+    val_records = load_bdd_data(VAL_JSON)
+    print(f"Loaded {len(val_records)} validation records")
+    
+    # Create visualizer
+    visualizer = DataVisualizer(config, train=train_records, val=val_records)
+    
+    print("Generating individual distribution plots...")
+    
+    # Generate individual plots for training data
+    visualizer.plot_single(
+        visualizer.by_class(training=True), 
+        "Training Set - Class Distribution", 
+        "train_classes.png"
+    )
+    
+    visualizer.plot_single(
+        visualizer.by_weather(training=True), 
+        "Training Set - Weather Distribution", 
+        "train_weather.png"
+    )
+    
+    visualizer.plot_single(
+        visualizer.by_scene(training=True), 
+        "Training Set - Scene Distribution", 
+        "train_scenes.png"
+    )
+    
+    # Generate individual plots for validation data
+    visualizer.plot_single(
+        visualizer.by_class(training=False), 
+        "Validation Set - Class Distribution", 
+        "val_classes.png"
+    )
+    
+    visualizer.plot_single(
+        visualizer.by_weather(training=False), 
+        "Validation Set - Weather Distribution", 
+        "val_weather.png"
+    )
+    
+    visualizer.plot_single(
+        visualizer.by_scene(training=False), 
+        "Validation Set - Scene Distribution", 
+        "val_scenes.png"
+    )
+    
+    print("Generating overview plots...")
+    
+    # Generate overview plots
+    visualizer.plot_overview(training=True)   # train_distributions.png
+    visualizer.plot_overview(training=False)  # val_distributions.png
+    
+    print("Generating comparison plots...")
+    
+    # Generate comparison plots
+    visualizer.compare_all()
+    
+    print("Analysis complete!")
+    print(f"Results saved to: {visualizer.output_dir}")
+    
+    # Print summary statistics
+    print("\n=== SUMMARY STATISTICS ===")
+    print(f"Training samples: {len(visualizer.train)}")
+    print(f"Validation samples: {len(visualizer.val)}")
+    
+    print("\nTop 5 classes in training:")
+    class_dist = visualizer.by_class(training=True)
+    for cls, count in sorted(class_dist.items(), key=lambda x: x[1], reverse=True)[:5]:
+        print(f"  {cls}: {count}")
+    
+    print("\nWeather distribution in training:")
+    weather_dist = visualizer.by_weather(training=True)
+    for weather, count in sorted(weather_dist.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {weather}: {count}")
+    
+    print("\nScene distribution in training:")
+    scene_dist = visualizer.by_scene(training=True)
+    for scene, count in sorted(scene_dist.items(), key=lambda x: x[1], reverse=True):
+        print(f"  {scene}: {count}")
 
 
-# ==================== MAIN EXECUTION ====================
 if __name__ == "__main__":
-    print("=== TRAIN SPLIT ANALYSIS ===")
-    train_data = load_json_annotations(TRAIN_LABELS_JSON)
-    validate_annotations(train_data, IMAGES_PATH_TRAIN)
-    plot_class_distribution(train_data, 'train')
-    plot_bbox_size_distribution(train_data, 'train')
-    plot_image_properties(train_data, IMAGES_PATH_TRAIN, 'train')
-    visualize_difficult_cases(train_data, IMAGES_PATH_TRAIN, 'train')
-
-    print("=== VALIDATION SPLIT ANALYSIS ===")
-    val_data = load_json_annotations(VAL_LABELS_JSON)
-    validate_annotations(val_data, IMAGES_PATH_VAL)
-    plot_class_distribution(val_data, 'val')
-    plot_bbox_size_distribution(val_data, 'val')
-    plot_image_properties(val_data, IMAGES_PATH_VAL, 'val')
-    visualize_difficult_cases(val_data, IMAGES_PATH_VAL, 'val')
+    main()
